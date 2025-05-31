@@ -1,0 +1,194 @@
+# unzip given dataset uploaded to runtime content
+!unzip -q /content/CompVisionDataset_Reduced.zip
+
+# Import libraries
+import os
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import tensorflow as tf
+
+from sklearn.metrics import confusion_matrix, classification_report
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+
+# Load training dataset and define parameters
+raw_train_ds = tf.keras.utils.image_dataset_from_directory(
+    directory='/content/CompVisionDataset_Reduced/train',
+    labels='inferred',
+    color_mode="rgb",
+    label_mode='categorical',
+    batch_size=32,
+    image_size=(200, 200)
+)
+
+# Save class names 
+class_names = raw_train_ds.class_names
+
+AUTOTUNE = tf.data.AUTOTUNE
+train_ds = raw_train_ds.prefetch(buffer_size=AUTOTUNE)
+
+# Load validation dataset and define parameters
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    directory='/content/CompVisionDataset_Reduced/valid',
+    labels='inferred',
+    color_mode="rgb",
+    label_mode='categorical',
+    batch_size=32,
+    image_size=(200, 200)
+)
+val_ds = val_ds.prefetch(buffer_size=AUTOTUNE)
+
+# Extract the training input images and output class labels
+x_train = []
+y_train = []
+for images, labels in train_ds.take(-1):
+    x_train.append(images.numpy())
+    y_train.append(labels.numpy())
+
+x_train = np.concatenate(x_train, axis=0)
+y_train = np.concatenate(y_train, axis=0)
+
+print(y_train)
+
+# Extract the validation input images and output class labels
+x_val = []
+y_val = []
+for images, labels in val_ds.take(-1):
+    x_val.append(images.numpy())
+    y_val.append(labels.numpy())
+
+x_val = np.concatenate(x_val, axis=0)
+y_val = np.concatenate(y_val, axis=0)
+
+print(y_val)
+
+# Set number of classes
+num_classes = 8
+
+# Load pre-trained MobileNetV2 model without the top classifier
+base_model = MobileNetV2(
+    input_shape=(200, 200, 3),
+    include_top=False,
+    weights='imagenet'
+)
+
+# Freeze base model layers
+base_model.trainable = False
+
+# Create the transfer learning model
+model = models.Sequential([
+    tf.keras.layers.Input(shape=(200, 200, 3)),
+
+    base_model,
+    tf.keras.layers.GlobalAveragePooling2D(),
+
+    tf.keras.layers.Dropout(0.2),
+    tf.keras.layers.Dense(256, activation='relu'),
+    tf.keras.layers.Dropout(0.2),
+    tf.keras.layers.Dense(num_classes, activation='softmax')
+])
+
+# Compile the model
+opt = Adam(learning_rate=0.0002)
+model.compile(
+    loss='categorical_crossentropy',
+    optimizer=opt,
+    metrics=['accuracy',
+             tf.keras.metrics.Precision(name='precision'),
+             tf.keras.metrics.Recall(name='recall')]
+)
+
+# Print summary
+model.summary()
+
+# Train the model
+history = model.fit(
+    x_train, y_train,
+    batch_size=32,
+    epochs=100,
+    validation_data=(x_val, y_val),
+    callbacks=[
+        EarlyStopping(monitor='val_accuracy', patience=10, restore_best_weights=True)
+    ]
+)
+
+# Predict class labels for the validation set
+y_pred_probs = model.predict(x_val)
+y_pred = np.argmax(y_pred_probs, axis=1)
+y_true = np.argmax(y_val, axis=1)
+
+# Print classification report
+print(classification_report(y_true, y_pred, target_names=class_names))
+
+# list all data in history
+print(history.history.keys())
+
+# summarize history for accuracy
+plt.plot(history.history['accuracy'])
+plt.plot(history.history['val_accuracy'])
+plt.title('model accuracy')
+plt.ylabel('accuracy')
+plt.xlabel('epoch')
+plt.legend(['train', 'test'], loc='upper left')
+plt.show()
+
+# summarize history for loss
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.title('model loss')
+plt.ylabel('loss')
+plt.xlabel('epoch')
+plt.legend(['train', 'test'], loc='upper left')
+plt.show()
+
+# Evaluate on validation set
+score = model.evaluate(x_val, y_val, verbose=0)
+
+# Print metrics
+print("Test Accuracy :", round(score[1], 2))
+print("Test Precision:", round(score[2], 2))
+print("Test Recall   :", round(score[3], 2))
+
+# Measure inference time per image
+start_time = time.time()
+_ = model.predict(x_val, verbose=0)
+end_time = time.time()
+
+total_inference_time = end_time - start_time
+num_images = x_val.shape[0]
+inference_time_per_image = total_inference_time / num_images
+
+print(f"Inference time per image: {inference_time_per_image:.4f} seconds")
+
+# Save model to temporary file and get file size
+model_save_path = "/content/model_temp.h5"
+model.save(model_save_path)
+
+model_size_bytes = os.path.getsize(model_save_path)
+model_size_megabytes = model_size_bytes / (1024 * 1024)
+
+print(f"Model size: {model_size_megabytes:.2f} MB")
+
+# obtain model predictions 
+Yhat = model.predict(x_val)                    
+Yhat_integer = np.argmax(Yhat, axis=1)            
+Y_test_integer = np.argmax(y_val, axis=1)   
+
+# class name labels
+class_names = ['Anti-aircraft', 'Civilian Car', 'Civilian Truck',
+               'Light armored vehicles', 'Military Logistics', 'Tank',
+               'human', 'light utility vehicles'] 
+
+# calculate and plot confusion matrix
+cm = confusion_matrix(Y_test_integer, Yhat_integer, normalize="pred")    
+plt.figure(2).set_figwidth(15)                                           
+sns.heatmap(cm/np.sum(cm), annot=True, fmt=".2%", cmap="Blues",          
+            xticklabels=class_names, yticklabels=class_names)
+plt.title("Confusion Matrix", fontsize=12)                              
+plt.xlabel("Predicted Class", fontsize=12)                              
+plt.ylabel("True Class", fontsize=12)                                  
+plt.show()
