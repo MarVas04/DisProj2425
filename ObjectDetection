@@ -1,0 +1,115 @@
+!unzip -q /content/mil_footage.zip
+!pip install -q ultralytics
+
+from ultralytics import YOLO
+import os
+import shutil
+import yaml
+import random
+import matplotlib.pyplot as plt
+from PIL import Image
+from sklearn.model_selection import KFold
+
+#CONFIGURATION
+dataset_root = "/content/mil_footage"
+k_folds = 5
+model_type = "yolov8s.pt"
+epochs = 150
+img_size = 640
+
+# PREPARE COMBINED DATA 
+all_image_dir = os.path.join(dataset_root, "all_images")
+all_label_dir = os.path.join(dataset_root, "all_labels")
+os.makedirs(all_image_dir, exist_ok=True)
+os.makedirs(all_label_dir, exist_ok=True)
+
+# Combine images from train and valid
+for split in ["train", "valid"]:
+    image_src = os.path.join(dataset_root, split, "images")
+    label_src = os.path.join(dataset_root, split, "labels")
+
+    for file in os.listdir(image_src):
+        if file.endswith(".jpg"):
+            shutil.copy(os.path.join(image_src, file), os.path.join(all_image_dir, file))
+    for file in os.listdir(label_src):
+        if file.endswith(".txt"):
+            shutil.copy(os.path.join(label_src, file), os.path.join(all_label_dir, file))
+
+# K-FOLD SPLITTING AND TRAINING
+image_files = sorted([f for f in os.listdir(all_image_dir) if f.endswith(".jpg")])
+kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+
+fold_results = []
+
+for fold, (train_idx, val_idx) in enumerate(kf.split(image_files)):
+    print(f"\n🔁 Fold {fold + 1}/{k_folds}")
+
+    # Directory structure for each fold
+    fold_dir = os.path.join(dataset_root, f"fold_{fold}")
+    train_img_dir = os.path.join(fold_dir, "images", "train")
+    val_img_dir = os.path.join(fold_dir, "images", "val")
+    train_lbl_dir = os.path.join(fold_dir, "labels", "train")
+    val_lbl_dir = os.path.join(fold_dir, "labels", "val")
+    for d in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:
+        os.makedirs(d, exist_ok=True)
+
+    # Copy images and labels for train and validation
+    for idxs, img_out, lbl_out in [(train_idx, train_img_dir, train_lbl_dir), (val_idx, val_img_dir, val_lbl_dir)]:
+        for idx in idxs:
+            img_file = image_files[idx]
+            lbl_file = img_file.replace(".jpg", ".txt")
+            shutil.copy(os.path.join(all_image_dir, img_file), os.path.join(img_out, img_file))
+            shutil.copy(os.path.join(all_label_dir, lbl_file), os.path.join(lbl_out, lbl_file))
+
+    # Create fold-specific YAML config
+    yaml_path = os.path.join(fold_dir, "data.yaml")
+    data_yaml = {
+        "path": fold_dir,
+        "train": "images/train",
+        "val": "images/val",
+        "nc": 8,
+        "names": ['artillery', 'car', 'explosion', 'military_truck',
+                  'military_vehicle', 'person', 'tank', 'truck']
+    }
+    with open(yaml_path, "w") as f:
+        yaml.dump(data_yaml, f)
+
+    # Remove previous run folder if exists
+    train_output_dir = f"runs/detect/train_fold{fold}"
+    if os.path.exists(train_output_dir):
+        shutil.rmtree(train_output_dir)
+
+    # Train YOLO model
+    model = YOLO(model_type)
+    model.train(
+        data=yaml_path,
+        imgsz=img_size,
+        epochs=epochs,
+        batch=-1,
+        device=0,
+        patience=8,
+        save=True,
+        verbose=True,
+        project="runs/detect",
+        name=f"train_fold{fold}",
+        exist_ok=True
+    )
+
+    # Evaluate model on validation set
+    best_model_path = f"runs/detect/train_fold{fold}/weights/best.pt"
+    best_model = YOLO(best_model_path)
+    val_metrics = best_model.val()
+
+    map50 = val_metrics.results_dict.get("metrics/mAP_0.5", 0.0)
+    print(f"✅ Fold {fold + 1} mAP50: {map50:.4f}")
+    fold_results.append(map50)
+
+# summary
+print("\n📊 K-Fold Cross-Validation Results:")
+for i, score in enumerate(fold_results):
+    print(f"Fold {i + 1}: mAP50 = {score:.4f}")
+print(f"📈 Mean mAP50: {sum(fold_results)/k_folds:.4f}")
+
+# ==== (Optional) PRINT KEYS FROM LAST RESULTS ====
+print("\n🔍 Validation Results Keys from Last Fold:")
+print(val_metrics.results_dict.keys())
