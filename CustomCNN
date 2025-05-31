@@ -1,0 +1,225 @@
+# import libraries
+import os
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import tensorflow as tf
+
+from sklearn.metrics import confusion_matrix, classification_report
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, BatchNormalization, Activation, Input, Conv2D, MaxPooling2D, Flatten, Softmax
+from keras import optimizers, regularizers
+from tensorflow.keras.layers import RandomTranslation, RandomZoom, RandomRotation
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.python.framework.convert_to_constants import convert_variables_to_constants_v2
+
+# unzip given dataset uploaded to runtime content
+!unzip -q /content/CompVisionDataset_Reduced.zip
+
+# Load training dataset and define parameters
+raw_train_ds = tf.keras.utils.image_dataset_from_directory(
+    directory='/content/CompVisionDataset_Reduced/train',
+    labels='inferred',
+    color_mode="rgb",
+    label_mode='categorical',
+    batch_size=32,
+    image_size=(200, 200)
+)
+
+# Save class names 
+class_names = raw_train_ds.class_names
+
+AUTOTUNE = tf.data.AUTOTUNE
+train_ds = raw_train_ds.prefetch(buffer_size=AUTOTUNE)
+
+# Load validation dataset and define parameters
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    directory='/content/CompVisionDataset_Reduced/valid',
+    labels='inferred',
+    color_mode="rgb",
+    label_mode='categorical',
+    batch_size=32,
+    image_size=(200, 200)
+)
+val_ds = val_ds.prefetch(buffer_size=AUTOTUNE)
+
+# Extract the training input images and output class labels
+x_train = []
+y_train = []
+for images, labels in train_ds.take(-1):
+    x_train.append(images.numpy())
+    y_train.append(labels.numpy())
+
+x_train = np.concatenate(x_train, axis=0)
+y_train = np.concatenate(y_train, axis=0)
+
+print(y_train)
+
+# Extract the validation input images and output class labels
+x_val = []
+y_val = []
+for images, labels in val_ds.take(-1):
+    x_val.append(images.numpy())
+    y_val.append(labels.numpy())
+
+x_val = np.concatenate(x_val, axis=0)
+y_val = np.concatenate(y_val, axis=0)
+
+print(y_val)
+
+# number of classes
+num_classes = 8
+
+# number of convolutional filters
+num_filters = 32
+
+model = Sequential([
+    Input(shape=(200, 200, 3)),
+
+    # Layer 1
+    Conv2D(32, (3, 3), padding='same'),
+    BatchNormalization(),
+    tf.keras.layers.LeakyReLU(alpha=0.01),
+    MaxPooling2D(pool_size=(2, 2)),
+
+    # Layer 2
+    Conv2D(64, (3, 3), padding='same'),
+    BatchNormalization(),
+    tf.keras.layers.LeakyReLU(alpha=0.01),
+    MaxPooling2D(pool_size=(2, 2)),
+
+    # Layer 3
+    Conv2D(128, (3, 3), padding='same'),
+    BatchNormalization(),
+    tf.keras.layers.LeakyReLU(alpha=0.01),
+    MaxPooling2D(pool_size=(2, 2)),
+
+    # Layer 4
+    Conv2D(256, (3, 3), padding='same'),
+    BatchNormalization(),
+    tf.keras.layers.LeakyReLU(alpha=0.01),
+    MaxPooling2D(pool_size=(2, 2)),
+
+    # Layer 5
+    Conv2D(512, (3, 3), padding='same'),
+    BatchNormalization(),
+    tf.keras.layers.LeakyReLU(alpha=0.01),
+    MaxPooling2D(pool_size=(2, 2)),
+
+    # Flatten and Dense
+    Flatten(),
+    Dropout(0.2),
+    Dense(256),
+    tf.keras.layers.LeakyReLU(alpha=0.01),
+    Dropout(0.3),
+    Dense(num_classes, activation='softmax')
+])
+
+# set the optimization parameters and compile the model
+opt = optimizers.Adam(learning_rate=0.001)
+model.compile(loss="categorical_crossentropy", optimizer=opt, metrics=['accuracy',
+        tf.keras.metrics.Precision(name='precision'),
+        tf.keras.metrics.Recall(name='recall')])
+
+# print model summary
+model.summary()
+
+history = model.fit(x_train, y_train, batch_size=32, epochs=125, validation_data=(x_val, y_val),
+                    callbacks=[EarlyStopping(monitor='val_accuracy', patience=20, 
+                                             restore_best_weights=True)])
+
+# Predict class labels for the validation set
+y_pred_probs = model.predict(x_val)
+y_pred = np.argmax(y_pred_probs, axis=1)
+y_true = np.argmax(y_val, axis=1)
+
+# Print classification report
+print(classification_report(y_true, y_pred, target_names=class_names))
+
+# list all data in model
+print(history.history.keys())
+
+# summarize model for accuracy
+plt.plot(history.history['accuracy'])
+plt.plot(history.history['val_accuracy'])
+plt.title('model accuracy')
+plt.ylabel('accuracy')
+plt.xlabel('epoch')
+plt.legend(['train', 'test'], loc='upper left')
+plt.show()
+
+# summarize model for loss
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.title('model loss')
+plt.ylabel('loss')
+plt.xlabel('epoch')
+plt.legend(['train', 'test'], loc='upper left')
+plt.show()
+
+# Evaluate on validation set
+score = model.evaluate(x_val, y_val, verbose=0)
+
+# Print metrics
+print("Test Accuracy :", round(score[1], 2))
+print("Test Precision:", round(score[2], 2))
+print("Test Recall   :", round(score[3], 2))
+
+# Create dummy input and concrete function
+dummy_input = tf.random.normal([1, 200, 200, 3])
+full_model = tf.function(lambda x: model(x))
+concrete_func = full_model.get_concrete_function(dummy_input)
+
+# Convert to frozen graph
+frozen_func = convert_variables_to_constants_v2(concrete_func)
+graph_def = frozen_func.graph.as_graph_def()
+
+# Profile FLOPs
+flops = tf.compat.v1.profiler.profile(
+    graph=frozen_func.graph,
+    options=tf.compat.v1.profiler.ProfileOptionBuilder.float_operation()
+)
+
+print(f"FLOPs: {flops.total_float_ops / 1e9:.2f} GFLOPs")
+
+# inference time per image
+start_time = time.time()
+_ = model.predict(x_val, verbose=0)
+end_time = time.time()
+
+total_inference_time = end_time - start_time
+num_images = x_val.shape[0]
+inference_time_per_image = total_inference_time / num_images
+
+print(f"Inference time per image: {inference_time_per_image:.4f} seconds")
+
+# Save model to temporary file and get file size to obtain model size
+model_save_path = "/content/model_temp.h5"
+model.save(model_save_path)
+
+model_size_bytes = os.path.getsize(model_save_path)
+model_size_megabytes = model_size_bytes / (1024 * 1024)
+
+print(f"Model size: {model_size_megabytes:.2f} MB")
+
+# obtain model predictions and convert softmax outputs 0-1 to integer class label predictions
+Yhat = model.predict(x_val)                    
+Yhat_integer = np.argmax(Yhat, axis=1)         
+Y_test_integer = np.argmax(y_val, axis=1)  
+
+# class name labels
+class_names = ['Anti-aircraft', 'Civilian Car', 'Civilian Truck',
+               'Light armored vehicles','Military Logistics','Tank',
+               'human','light utility vehicles',
+               ] 
+
+# calculate and plot confusion matrix
+cm = confusion_matrix(Y_test_integer, Yhat_integer , normalize="pred")   
+plt.figure(2).set_figwidth(15)                                            
+sns.heatmap(cm/np.sum(cm), annot=True, fmt=".2%", cmap="Blues",          
+            xticklabels=class_names, yticklabels=class_names)
+plt.title("Confusion Matrix", fontsize = 12)                              
+plt.xlabel("Predicted Class", fontsize = 12)                              
+plt.ylabel("True Class", fontsize = 12)                                   
+plt.show()
