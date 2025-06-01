@@ -215,11 +215,12 @@ class_names = ['Anti-aircraft', 'Civilian Car', 'Civilian Truck',
                ] 
 
 # calculate and plot confusion matrix
-cm = confusion_matrix(Y_test_integer, Yhat_integer , normalize="pred")   
-plt.figure(2).set_figwidth(15)                                            
-sns.heatmap(cm/np.sum(cm), annot=True, fmt=".2%", cmap="Blues",          
+cm = confusion_matrix(Y_test_integer, Yhat_integer, normalize="pred")   
+
+plt.figure(2).set_figwidth(15)
+sns.heatmap(cm, annot=True, fmt=".2%", cmap="Blues",  # Use cm directly
             xticklabels=class_names, yticklabels=class_names)
-plt.title("Confusion Matrix", fontsize = 12)                              
-plt.xlabel("Predicted Class", fontsize = 12)                              
-plt.ylabel("True Class", fontsize = 12)                                   
+plt.title("Confusion Matrix", fontsize=12)
+plt.xlabel("Predicted Class", fontsize=12)
+plt.ylabel("True Class", fontsize=12)
 plt.show()
